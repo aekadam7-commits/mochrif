@@ -1,0 +1,205 @@
+name: Build Ghiyabat APK and EXE
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # فك ضغط مصدر التطبيق إن وُجد أرشيف ZIP في جذر المستودع
+      - name: Unzip source archive
+        shell: bash
+        run: |
+          set -e
+          ZIP=""
+          for f in school-app-source.zip source.zip app-source.zip ghiyabat-source.zip *.zip; do
+            if [ -f "$f" ]; then ZIP="$f"; break; fi
+          done
+          if [ -n "$ZIP" ]; then
+            echo "Extracting $ZIP ..."
+            # إن كان الأرشيف يحوي مجلداً واحداً في الجذر نُخرج محتواه إلى المجلد الحالي
+            TOP=$(zipinfo -1 "$ZIP" | head -1 | cut -d/ -f1)
+            COUNT=$(zipinfo -1 "$ZIP" | cut -d/ -f1 | sort -u | wc -l)
+            if [ "$COUNT" = "1" ] && zipinfo -1 "$ZIP" | head -1 | grep -q '/'; then
+              mkdir -p _src
+              unzip -oq "$ZIP" -d _src
+              # نقل محتوى المجلد الوحيد إلى الجذر (بدون الكتابة فوق .github)
+              shopt -s dotglob
+              for item in _src/"$TOP"/*; do
+                base=$(basename "$item")
+                if [ "$base" = ".github" ]; then continue; fi
+                rm -rf "./$base"
+                mv "$item" "./$base"
+              done
+              rm -rf _src
+            else
+              unzip -oq "$ZIP" -x ".github/*" ".github/**"
+            fi
+            echo "Source extracted."
+            ls -la
+          else
+            echo "No source zip found — using repo tree as-is."
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Inject repo for auto QR
+        run: node tools/inject-repo.js
+        env:
+          REPO: ${{ github.repository }}
+
+      - name: Prepare desktop project
+        run: node tools/prepare-desktop.js
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Build Windows installer
+        working-directory: desktop
+        run: npm run dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ghiyabat-windows
+          path: desktop/dist/*.exe
+          if-no-files-found: error
+
+  android-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unzip source archive
+        run: |
+          set -e
+          ZIP=""
+          for f in school-app-source.zip source.zip app-source.zip ghiyabat-source.zip *.zip; do
+            if [ -f "$f" ]; then ZIP="$f"; break; fi
+          done
+          if [ -n "$ZIP" ]; then
+            echo "Extracting $ZIP ..."
+            TOP=$(zipinfo -1 "$ZIP" | head -1 | cut -d/ -f1)
+            COUNT=$(zipinfo -1 "$ZIP" | cut -d/ -f1 | sort -u | wc -l)
+            if [ "$COUNT" = "1" ] && zipinfo -1 "$ZIP" | head -1 | grep -q '/'; then
+              mkdir -p _src
+              unzip -oq "$ZIP" -d _src
+              shopt -s dotglob
+              for item in _src/"$TOP"/*; do
+                base=$(basename "$item")
+                if [ "$base" = ".github" ]; then continue; fi
+                rm -rf "./$base"
+                mv "$item" "./$base"
+              done
+              rm -rf _src
+            else
+              unzip -oq "$ZIP" -x ".github/*" ".github/**" || unzip -oq "$ZIP"
+            fi
+            echo "Source extracted."
+            ls -la
+          else
+            echo "No source zip found — using repo tree as-is."
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+
+      - name: Inject repo for auto QR
+        run: node tools/inject-repo.js
+        env:
+          REPO: ${{ github.repository }}
+
+      - name: Install Capacitor and embedded Node runtime
+        run: |
+          npm install
+          npm install https://github.com/hampoelz/capacitor-nodejs/releases/download/v1.0.0-beta.8/capacitor-nodejs.tgz
+
+      - name: Prepare embedded server
+        run: |
+          node tools/prepare-android.js pre
+          cd www/nodejs
+          npm install --omit=dev
+          cd ../..
+
+      - name: Add Android platform and sync
+        run: |
+          [ -d android ] || npx cap add android
+          npx cap sync android
+
+      - name: Patch Android service
+        run: |
+          node tools/prepare-android.js post
+          npx cap sync android
+
+      - name: Fix gradlew permissions
+        run: chmod +x android/gradlew
+
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk Ghiyabat.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ghiyabat-android
+          path: Ghiyabat.apk
+          if-no-files-found: error
+
+  release:
+    needs: [windows-exe, android-apk]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+
+      - name: Generate QR code for direct APK download
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          pip install "qrcode[pil]"
+          python3 - <<'PY'
+          import os, qrcode
+          url = "https://github.com/%s/releases/latest/download/Ghiyabat.apk" % os.environ["REPO"]
+          qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=14, border=4)
+          qr.add_data(url)
+          qr.make(fit=True)
+          qr.make_image(fill_color="black", back_color="white").save("Ghiyabat-QR.png")
+          print(url)
+          PY
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Ghiyabat Build ${{ github.run_number }}
+          make_latest: true
+          body: |
+            رابط التحميل المباشر للتطبيق (APK):
+            https://github.com/${{ github.repository }}/releases/latest/download/Ghiyabat.apk
+
+            امسح الصورة Ghiyabat-QR.png بالكاميرا لتحميل التطبيق مباشرة.
+          files: |
+            out/ghiyabat-windows/*.exe
+            out/ghiyabat-android/Ghiyabat.apk
+            Ghiyabat-QR.png
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -11,40 +11,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # فك ضغط مصدر التطبيق إن وُجد أرشيف ZIP في جذر المستودع
       - name: Unzip source archive
         shell: bash
         run: |
-          set -e
           ZIP=""
-          for f in school-app-source.zip source.zip app-source.zip ghiyabat-source.zip *.zip; do
+          for f in school-app-source.zip source.zip app-source.zip ghiyabat-source.zip; do
             if [ -f "$f" ]; then ZIP="$f"; break; fi
           done
-          if [ -n "$ZIP" ]; then
-            echo "Extracting $ZIP ..."
-            # إن كان الأرشيف يحوي مجلداً واحداً في الجذر نُخرج محتواه إلى المجلد الحالي
-            TOP=$(zipinfo -1 "$ZIP" | head -1 | cut -d/ -f1)
-            COUNT=$(zipinfo -1 "$ZIP" | cut -d/ -f1 | sort -u | wc -l)
-            if [ "$COUNT" = "1" ] && zipinfo -1 "$ZIP" | head -1 | grep -q '/'; then
-              mkdir -p _src
-              unzip -oq "$ZIP" -d _src
-              # نقل محتوى المجلد الوحيد إلى الجذر (بدون الكتابة فوق .github)
-              shopt -s dotglob
-              for item in _src/"$TOP"/*; do
-                base=$(basename "$item")
-                if [ "$base" = ".github" ]; then continue; fi
-                rm -rf "./$base"
-                mv "$item" "./$base"
-              done
-              rm -rf _src
-            else
-              unzip -oq "$ZIP" -x ".github/*" ".github/**"
-            fi
-            echo "Source extracted."
-            ls -la
-          else
-            echo "No source zip found — using repo tree as-is."
+          if [ -z "$ZIP" ]; then
+            for f in *.zip; do
+              [ -f "$f" ] || continue
+              case "$f" in *QR*|*qr*) continue ;; esac
+              ZIP="$f"
+              break
+            done
           fi
+          if [ -z "$ZIP" ]; then
+            echo "No source zip found — using repo tree as-is."
+            exit 0
+          fi
+          echo "Extracting $ZIP ..."
+          rm -rf _src
+          mkdir _src
+          unzip -oq "$ZIP" -d _src
+          # عدد العناصر في المستوى الأول
+          n=$(find _src -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')
+          only=""
+          for d in _src/*/; do
+            [ -d "$d" ] || continue
+            if [ -z "$only" ]; then only="${d%/}"; else only="__multi__"; break; fi
+          done
+          if [ "$only" = "__multi__" ]; then only=""; fi
+          if [ "$n" = "1" ] && [ -n "$only" ] && [ -d "$only" ]; then
+            SRC="$only"
+            echo "Nested folder detected: $SRC"
+          else
+            SRC="_src"
+            echo "Flat archive"
+          fi
+          # نسخ الملفات إلى جذر العمل دون المساس بـ .github
+          find "$SRC" -mindepth 1 -maxdepth 1 ! -name '.github' ! -name '.git' -print0 | while IFS= read -r -d '' item; do
+            base=$(basename "$item")
+            rm -rf "./$base"
+            mv "$item" "./$base"
+          done
+          rm -rf _src
+          echo "Source extracted. Root contents:"
+          ls -la
 
       - uses: actions/setup-node@v4
         with:
@@ -79,34 +92,48 @@ jobs:
 
       - name: Unzip source archive
         run: |
-          set -e
           ZIP=""
-          for f in school-app-source.zip source.zip app-source.zip ghiyabat-source.zip *.zip; do
+          for f in school-app-source.zip source.zip app-source.zip ghiyabat-source.zip; do
             if [ -f "$f" ]; then ZIP="$f"; break; fi
           done
-          if [ -n "$ZIP" ]; then
-            echo "Extracting $ZIP ..."
-            TOP=$(zipinfo -1 "$ZIP" | head -1 | cut -d/ -f1)
-            COUNT=$(zipinfo -1 "$ZIP" | cut -d/ -f1 | sort -u | wc -l)
-            if [ "$COUNT" = "1" ] && zipinfo -1 "$ZIP" | head -1 | grep -q '/'; then
-              mkdir -p _src
-              unzip -oq "$ZIP" -d _src
-              shopt -s dotglob
-              for item in _src/"$TOP"/*; do
-                base=$(basename "$item")
-                if [ "$base" = ".github" ]; then continue; fi
-                rm -rf "./$base"
-                mv "$item" "./$base"
-              done
-              rm -rf _src
-            else
-              unzip -oq "$ZIP" -x ".github/*" ".github/**" || unzip -oq "$ZIP"
-            fi
-            echo "Source extracted."
-            ls -la
-          else
-            echo "No source zip found — using repo tree as-is."
+          if [ -z "$ZIP" ]; then
+            for f in *.zip; do
+              [ -f "$f" ] || continue
+              case "$f" in *QR*|*qr*) continue ;; esac
+              ZIP="$f"
+              break
+            done
           fi
+          if [ -z "$ZIP" ]; then
+            echo "No source zip found — using repo tree as-is."
+            exit 0
+          fi
+          echo "Extracting $ZIP ..."
+          rm -rf _src
+          mkdir _src
+          unzip -oq "$ZIP" -d _src
+          n=$(find _src -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')
+          only=""
+          for d in _src/*/; do
+            [ -d "$d" ] || continue
+            if [ -z "$only" ]; then only="${d%/}"; else only="__multi__"; break; fi
+          done
+          if [ "$only" = "__multi__" ]; then only=""; fi
+          if [ "$n" = "1" ] && [ -n "$only" ] && [ -d "$only" ]; then
+            SRC="$only"
+            echo "Nested folder detected: $SRC"
+          else
+            SRC="_src"
+            echo "Flat archive"
+          fi
+          find "$SRC" -mindepth 1 -maxdepth 1 ! -name '.github' ! -name '.git' -print0 | while IFS= read -r -d '' item; do
+            base=$(basename "$item")
+            rm -rf "./$base"
+            mv "$item" "./$base"
+          done
+          rm -rf _src
+          echo "Source extracted. Root contents:"
+          ls -la
 
       - uses: actions/setup-node@v4
         with:
@@ -165,18 +192,29 @@ jobs:
           if-no-files-found: error
 
   release:
+    name: Create GitHub Release
     needs: [windows-exe, android-apk]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
         with:
           path: out
 
-      - name: Generate QR code for direct APK download
+      - name: List artifacts
+        run: |
+          echo "Artifacts tree:"
+          find out -type f -print || true
+          test -n "$(find out -name '*.exe' 2>/dev/null)" || { echo "Missing Windows EXE"; exit 1; }
+          test -n "$(find out -name 'Ghiyabat.apk' 2>/dev/null)" || { echo "Missing Android APK"; exit 1; }
+
+      - name: Generate QR code for APK download
         env:
           REPO: ${{ github.repository }}
         run: |
-          pip install "qrcode[pil]"
+          pip install -q "qrcode[pil]"
           python3 - <<'PY'
           import os, qrcode
           url = "https://github.com/%s/releases/latest/download/Ghiyabat.apk" % os.environ["REPO"]
@@ -184,22 +222,43 @@ jobs:
           qr.add_data(url)
           qr.make(fit=True)
           qr.make_image(fill_color="black", back_color="white").save("Ghiyabat-QR.png")
-          print(url)
+          print("QR URL:", url)
           PY
 
-      - uses: softprops/action-gh-release@v2
+      - name: Collect release files
+        run: |
+          mkdir -p release-files
+          # Windows EXE
+          find out -name '*.exe' -exec cp -v {} release-files/ \;
+          # Android APK (normalize name)
+          find out -name 'Ghiyabat.apk' -exec cp -v {} release-files/Ghiyabat.apk \;
+          cp -v Ghiyabat-QR.png release-files/
+          ls -la release-files
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: Ghiyabat Build ${{ github.run_number }}
+          draft: false
+          prerelease: false
           make_latest: true
+          generate_release_notes: true
           body: |
-            رابط التحميل المباشر للتطبيق (APK):
+            ## تحميل تسيير غيابات التلاميذ (Ghiyabat)
+
+            | الملف | الوصف |
+            |-------|--------|
+            | `Ghiyabat.apk` | تطبيق أندرويد |
+            | `Ghiyabat-Setup-*.exe` | مثبت ويندوز |
+            | `Ghiyabat-QR.png` | رمز QR للتحميل المباشر للـ APK |
+
+            **رابط التحميل المباشر للـ APK:**
             https://github.com/${{ github.repository }}/releases/latest/download/Ghiyabat.apk
 
-            امسح الصورة Ghiyabat-QR.png بالكاميرا لتحميل التطبيق مباشرة.
+            امسح صورة `Ghiyabat-QR.png` بالكاميرا لتحميل التطبيق مباشرة.
           files: |
-            out/ghiyabat-windows/*.exe
-            out/ghiyabat-android/Ghiyabat.apk
-            Ghiyabat-QR.png
+            release-files/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
